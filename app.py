@@ -2,15 +2,19 @@ import streamlit as st
 import pandas as pd
 import random
 import requests
+import urllib3
+
+# SSL 경고 숨기기 (깔끔한 로그를 위해)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ---------------------------------------------------------
-# 1. 데이터 수집 및 전처리 (안전장치 포함)
+# 1. 데이터 수집 및 전처리
 # ---------------------------------------------------------
 @st.cache_data(ttl=3600)
 def get_lotto_data():
     """
-    1순위: 동행복권 실시간 데이터 크롤링 시도
-    2순위: 실패 시(차단 등) 내장된 비상용 데이터 사용
+    데이터와 함께 '백업 데이터 사용 여부(True/False)'를 같이 반환합니다.
+    함수 안에서는 UI(st.toast 등)를 사용하지 않습니다.
     """
     url = "https://dhlottery.co.kr/gameResult.do?method=statByNumber"
     headers = {
@@ -19,32 +23,30 @@ def get_lotto_data():
     }
     
     try:
-        # SSL 인증서 검증 무시 (verify=False)로 접속 성공률 높임
+        # SSL 검증 무시 및 타임아웃 설정
         response = requests.get(url, headers=headers, timeout=5, verify=False)
         response.encoding = 'euc-kr'
         
-        # 테이블 읽기 시도
+        # 테이블 읽기
         dfs = pd.read_html(response.text, match='번호')
         
         if len(dfs) > 0:
             df = dfs[0]
-            # 컬럼 정리
+            # 데이터 정제
             df_clean = df.iloc[:, [0, 2]].copy()
             df_clean.columns = ['number', 'count']
             df_clean['number'] = pd.to_numeric(df_clean['number'], errors='coerce')
             df_clean['count'] = pd.to_numeric(df_clean['count'], errors='coerce')
-            return df_clean.dropna().astype(int).sort_values('number')
             
-    except Exception as e:
-        pass # 오류 발생 시 조용히 비상 데이터로 넘어감
+            # 성공 시: 데이터프레임과 False(백업아님) 반환
+            return df_clean.dropna().astype(int).sort_values('number'), False
+            
+    except Exception:
+        pass # 실패하면 조용히 아래 백업 로직으로 이동
 
     # -----------------------------------------------------
-    # [비상용] 크롤링 실패 시 사용할 백업 데이터 (최근 통계 기반 근사치)
+    # [비상용] 크롤링 실패 시 사용할 백업 데이터
     # -----------------------------------------------------
-    st.toast("⚠️ 실시간 서버 연결이 차단되어 '백업 데이터' 모드로 실행됩니다.", icon="📢")
-    
-    # 1~45번까지의 대략적인 당첨 횟수 데이터 (2024년 평균치 적용)
-    # 앱이 죽지 않도록 하는 것이 최우선
     backup_counts = [
         186, 172, 174, 179, 163, 168, 172, 164, 145, 172, # 1~10
         175, 185, 180, 178, 170, 172, 182, 186, 165, 175, # 11~20
@@ -58,7 +60,8 @@ def get_lotto_data():
         'count': backup_counts
     })
     
-    return df_backup
+    # 실패 시: 백업 데이터프레임과 True(백업임) 반환
+    return df_backup, True
 
 # ---------------------------------------------------------
 # 2. 가중치 계산 및 번호 추첨 로직
@@ -67,7 +70,6 @@ def generate_lotto_numbers(df):
     results = []
     
     # 가중치 평준화 (Smoothing): 격차를 1.5배 수준으로 완화
-    # 공식: (당첨횟수 + 100)
     smoothing_factor = 100 
     
     weights = [count + smoothing_factor for count in df['count'].tolist()]
@@ -116,8 +118,13 @@ st.title("🎱 AI 로또 추첨기")
 st.caption("빅데이터 가중치 알고리즘 (격차보정 1.5배)")
 
 # 데이터 로드
-with st.spinner('데이터 분석 및 가중치 계산 중...'):
-    df_stats = get_lotto_data()
+with st.spinner('데이터 분석 중...'):
+    # 함수에서 데이터(df)와 상태(is_backup)를 분리해서 받음
+    df_stats, is_backup = get_lotto_data()
+
+# 알림 메시지는 함수 밖에서 처리 (에러 원인 해결!)
+if is_backup:
+    st.toast("⚠️ 서버 연결 차단으로 '백업 데이터' 모드로 실행됩니다.", icon="📢")
 
 if not df_stats.empty:
     with st.expander("📊 현재 적용된 가중치 정보 보기"):
